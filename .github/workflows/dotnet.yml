@@ -4,16 +4,49 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+permissions:
+  contents: read
+
+concurrency:
+  group: tradeassistant-native-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: powershell
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
+        (github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]')))
+    runs-on: [self-hosted, Windows, X64, awl-ci, awl-ci-windows, awl-eu]
+    timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
-
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '10.0.x'
+        persist-credentials: false
+
+    - name: Select existing native .NET 10 SDK
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if (Test-Path -LiteralPath 'global.json') { throw 'An existing global.json must be reconciled before SDK selection.' }
+        $available = @(dotnet --list-sdks)
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $versions = @($available | ForEach-Object {
+          if ($_ -match '^(10\.0\.[0-9]+)\s+\[') { [version]$Matches[1] }
+        } | Sort-Object -Descending)
+        if ($versions.Count -eq 0) { throw 'The existing native runner requires a stable .NET 10.0 SDK.' }
+        $selected = $versions[0].ToString()
+        $configuration = @{sdk=@{version=$selected; rollForward='disable'; allowPrerelease=$false}} | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText((Join-Path $PWD 'global.json'), $configuration, [System.Text.UTF8Encoding]::new($false))
+        $actual = (dotnet --version).Trim()
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ($actual -ne $selected) { throw 'The selected SDK was not used.' }
+        Write-Output ('Using existing native .NET SDK ' + $actual)
 
     - name: Restore dependencies
       run: dotnet restore
