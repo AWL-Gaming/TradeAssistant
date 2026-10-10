@@ -444,14 +444,26 @@ namespace TradeAssistant
         public List<LocString> SetSellPrice(Item item, float newPrice)
         {
             newPrice = Mathf.RoundToAcceptedDigits(newPrice);
-            StoreSellPrices[item.TypeID] = newPrice;
-
             var msgs = new List<LocString>();
-            Store.StoreData.SellOffers.Where(o => o.MatchesTypeID(item.TypeID) && o.Price != newPrice).ForEach(o =>
+            // A tagged offer has one shared price. Preserve it when any represented item is frozen.
+            var offers = Store.StoreData.SellOffers
+                .Where(o => o.MatchesTypeID(item.TypeID))
+                .Where(o => !o.OfferedItemTypeIDs().Any(Config.FrozenSellPrices.Contains))
+                .ToList();
+            if (offers.Count == 0) return msgs;
+
+            offers.Where(o => o.Price != newPrice).ForEach(o =>
             {
                 msgs.AddLoc($"{Text.Positive(Localizer.DoStr("Updating sell price"))} of {item.UILink()} from {Text.StyledNum(o.Price)} to {Text.StyledNum(newPrice)}");
                 o.Price = newPrice;
             });
+            // Shared offers can affect several item IDs, and frozen overlapping offers can retain a lower price.
+            var actualPrices = Store.StoreData.SellOffers
+                .SelectMany(o => o.OfferedItemTypeIDs().Select(typeID => new { typeID, o.Price }))
+                .GroupBy(x => x.typeID)
+                .ToDictionary(x => x.Key, x => x.Min(o => o.Price));
+            StoreSellPrices.Clear();
+            foreach (var price in actualPrices) StoreSellPrices.Add(price.Key, price.Value);
             return msgs;
         }
 
@@ -459,14 +471,58 @@ namespace TradeAssistant
         public List<LocString> SetBuyPrice(Item item, float newPrice)
         {
             newPrice = Mathf.RoundToAcceptedDigits(newPrice);
-            StoreBuyPrices[item.TypeID] = newPrice;
-
             var msgs = new List<LocString>();
-            Store.StoreData.BuyOffers.Where(o => o.MatchesTypeID(item.TypeID) && o.Price != newPrice).ForEach(o =>
+            var offers = Store.StoreData.BuyOffers.Where(o => o.MatchesTypeID(item.TypeID)).ToList();
+            if (offers.Count == 0) return msgs;
+            offers.Where(o => o.Price != newPrice).ForEach(o =>
             {
                 msgs.AddLoc($"{Text.Positive(Localizer.DoStr("Updating buy price"))} of {item.UILink()} from {Text.StyledNum(o.Price)} to {Text.StyledNum(newPrice)}");
                 o.Price = newPrice;
             });
+            var actualPrices = Store.StoreData.BuyOffers
+                .SelectMany(o => o.OfferedItemTypeIDs().Select(typeID => new { typeID, o.Price }))
+                .GroupBy(x => x.typeID)
+                .ToDictionary(x => x.Key, x => x.Max(o => o.Price));
+            StoreBuyPrices.Clear();
+            foreach (var price in actualPrices) StoreBuyPrices.Add(price.Key, price.Value);
+            return msgs;
+        }
+
+        public List<LocString> SetSellPrices(IReadOnlyDictionary<int, float> prices, List<LocString> skipped, bool reportIncomplete = true) =>
+            SetOfferPrices(prices, skipped, false, reportIncomplete);
+
+        public List<LocString> SetBuyPrices(IReadOnlyDictionary<int, float> prices, List<LocString> skipped) =>
+            SetOfferPrices(prices, skipped, true, true);
+
+        private List<LocString> SetOfferPrices(IReadOnlyDictionary<int, float> prices, List<LocString> skipped, bool buying, bool reportIncomplete)
+        {
+            var msgs = new List<LocString>();
+            var offers = buying ? Store.StoreData.BuyOffers : Store.StoreData.SellOffers;
+            foreach (var offer in offers)
+            {
+                var ids = offer.OfferedItemTypeIDs().Distinct().OrderBy(id => id).ToList();
+                if (!ids.Any(prices.ContainsKey)) continue;
+                if (!buying && ids.Any(Config.FrozenSellPrices.Contains)) continue;
+                if (ids.Any(id => !prices.TryGetValue(id, out var price) || !float.IsFinite(price) || price < 0))
+                {
+                    if (reportIncomplete)
+                        skipped.AddLoc($"Kept the {(buying ? "buy" : "sell")} price for the order containing {Item.Get(ids[0]).UILink()}: a cost could not be calculated for every item in the order.");
+                    continue;
+                }
+                // One tagged order has one price: cover every sell cost and never overpay for a buy item.
+                var priceItem = buying ? ids.MinBy(id => prices[id]) : ids.MaxBy(id => prices[id]);
+                var newPrice = Mathf.RoundToAcceptedDigits(prices[priceItem]);
+                if (offer.Price == newPrice) continue;
+                msgs.AddLoc($"{Text.Positive(Localizer.DoStr(buying ? "Updating buy price" : "Updating sell price"))} for the order containing {Item.Get(priceItem).UILink()} from {Text.StyledNum(offer.Price)} to {Text.StyledNum(newPrice)}");
+                offer.Price = newPrice;
+            }
+            var actualPrices = offers
+                .SelectMany(o => o.OfferedItemTypeIDs().Select(typeID => new {typeID, o.Price}))
+                .GroupBy(x => x.typeID)
+                .ToDictionary(x => x.Key, x => buying ? x.Max(o => o.Price) : x.Min(o => o.Price));
+            var cache = buying ? StoreBuyPrices : StoreSellPrices;
+            cache.Clear();
+            foreach (var price in actualPrices) cache.Add(price.Key, price.Value);
             return msgs;
         }
     }
