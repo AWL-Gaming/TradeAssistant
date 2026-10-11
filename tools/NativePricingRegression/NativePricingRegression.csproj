@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <EcoNativeDir Condition="'$(EcoNativeDir)' == ''">$(AWL_ECO_NATIVE_DIR)</EcoNativeDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\TradeAssistant.csproj" />
+    <Reference Include="$(EcoNativeDir)\Eco.*.dll" />
+    <Reference Include="$(EcoNativeDir)\PropertyChanged.dll" />
+    <Reference Include="$(EcoNativeDir)\LiteDB.dll" />
+  </ItemGroup>
+  <Target Name="RequireNativeEcoRuntime" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(EcoNativeDir)\Eco.Gameplay.dll')" Text="Set EcoNativeDir or AWL_ECO_NATIVE_DIR to an immutable copy of the Eco 1099 runtime assemblies. Reference assemblies cannot run this suite." />
+  </Target>
+</Project>

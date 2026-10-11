@@ -1,4 +1,4 @@
-﻿using Eco.Core.Plugins;
+using Eco.Core.Plugins;
 using Eco.Gameplay.Economy;
 using Eco.Gameplay.Items;
 using Eco.Gameplay.Players;
@@ -167,29 +167,38 @@ namespace TradeAssistant
             var output = new StringBuilder();
             var updates = new List<LocString>();
             var warnings = new List<LocString>();
+            var skipped = new List<LocString>();
+            var sellPrices = new Dictionary<int, float>();
 
 
-            foreach (var itemID in storeSellItemIds.OrderBy(p => byProducts.Contains(p) ? 0 : 1))
+            foreach (var byProductPhase in new[] {true, false})
             {
-                if (calc.TryGetCostPrice(itemID, out var price, out var reason, out var itemWarnings))
+                foreach (var itemID in storeSellItemIds.Where(p => byProducts.Contains(p) == byProductPhase))
                 {
-                    // SellPrice = Tax + CostPrice * (1 + Profit)
-                    // SellPrice = SellPrice * TaxRate + CostPrice * (1 + Profit)
-                    // SellPrice - SellPrice * TaxRate = CostPrice * (1 + Profit)
-                    // SellPrice * (1 - TaxRate) = CostPrice * (1 + Profit)
-                    // SellPrice = CostPrice * (1 + Profit) / (1 - TaxRate)
-                    var newPrice = Mathf.RoundToAcceptedDigits(price * (1 + calc.Config.Profit / 100f) / (1 - calc.Store.GetTax()));
-                    updates.AddRange(calc.SetSellPrice(itemID, newPrice));
-                    if (itemWarnings != null)
-                        warnings.AddRange(itemWarnings);
+                    if (calc.TryGetCostPrice(itemID, out var price, out var reason, out var itemWarnings))
+                    {
+                        // SellPrice = Tax + CostPrice * (1 + Profit)
+                        // SellPrice = SellPrice * TaxRate + CostPrice * (1 + Profit)
+                        // SellPrice - SellPrice * TaxRate = CostPrice * (1 + Profit)
+                        // SellPrice * (1 - TaxRate) = CostPrice * (1 + Profit)
+                        // SellPrice = CostPrice * (1 + Profit) / (1 - TaxRate)
+                        var newPrice = Mathf.RoundToAcceptedDigits(price * (1 + calc.Config.Profit / 100f) / (1 - calc.Store.GetTax()));
+                        sellPrices[itemID] = newPrice;
+                        if (itemWarnings != null)
+                            warnings.AddRange(itemWarnings);
+                    }
+                    else if (!byProducts.Contains(itemID) && craftableItems.Contains(itemID))
+                        output.AppendLineLoc($"Failed to get the cost price of {Item.Get(itemID).UILink()} ({TextLoc.FoldoutLoc($"Why?", $"Why {Item.Get(itemID).UILink()}", reason.ToStringLoc())}).");
                 }
-                else if (!byProducts.Contains(itemID) && craftableItems.Contains(itemID))
-                    output.AppendLineLoc($"Failed to get the cost price of {Item.Get(itemID).UILink()} ({TextLoc.FoldoutLoc($"Why?", $"Why {Item.Get(itemID).UILink()}", reason.ToStringLoc())}).");
+                updates.AddRange(calc.SetSellPrices(sellPrices, skipped, reportIncomplete: !byProductPhase));
             }
 
+            var buyPrices = new Dictionary<int, float>();
             foreach (var itemID in buyProductsToUpdate)
                 if (calc.TryGetCostPrice(itemID, out var price, out var _, out var _))
-                    updates.AddRange(calc.SetBuyPrice(itemID, price));
+                    buyPrices[itemID] = price;
+            updates.AddRange(calc.SetBuyPrices(buyPrices, skipped));
+            foreach (var notice in skipped.Distinct()) output.AppendLine(notice);
 
             // TODO: I'm not happy with how warnings are working at the moment. Removing them for now.
             //if (warnings.Any())

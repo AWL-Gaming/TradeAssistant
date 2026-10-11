@@ -1,5 +1,6 @@
 ﻿using Eco.Gameplay.Components;
 using Eco.Gameplay.Components.Store;
+using Eco.Gameplay.Bonuses;
 using Eco.Gameplay.DynamicValues;
 using Eco.Gameplay.Economy;
 using Eco.Gameplay.Items;
@@ -45,7 +46,7 @@ namespace TradeAssistant
             Store = store;
             CraftingTables = craftingTables;
             CraftableItems = craftableItems;
-            Users = config.PartnerPlayers.Append(user.Id).ToHashSet().Select(id => UserManager.FindUserByID(id)).ToList();
+            Users = config.PartnerPlayers.Append(user.Id).ToHashSet().Select(id => UserManager.FindUserByID(id)).Where(foundUser => foundUser != null).ToList();
             Config = config;
 
             StoreBuyPrices = store.StoreData.BuyOffers
@@ -181,6 +182,9 @@ namespace TradeAssistant
                     // Ignore by-products if there is more than one product, and make sure the only product is the specified item
                     var products = recipe.Products;
                     var resourceEfficiencyContext = new ModuleContext(user, craftingTable.Parent.Position, craftingTable.ResourceEfficiencyModule);
+                    var resourceBonusContext = BonusContext.ForCraftingPreview(user, recipe.Family, craftingTable.Parent, BonusAction.ResourceCost);
+                    var laborBonusContext = BonusContext.ForCraftingPreview(user, recipe.Family, craftingTable.Parent, BonusAction.LaborCost);
+                    var yieldBonusContext = BonusContext.ForCraftingPreview(user, recipe.Family, craftingTable.Parent, BonusAction.Yield);
                     if (recipe.Products.Count > 1)
                     {
                         products = recipe.Products.Where(p => !Config.ByProducts.Any(byProductId => byProductId == p.Item.TypeID)).ToList();
@@ -198,7 +202,7 @@ namespace TradeAssistant
                     }
 
                     // Check the price of the by-products
-                    var byProducts = recipe.Products.Where(p => p != product).Select(p => ParseByProduct(p, resourceEfficiencyContext, craftingTable)).ToList();
+                    var byProducts = recipe.Products.Where(p => p != product).Select(p => ParseByProduct(p, recipe, resourceEfficiencyContext, craftingTable, resourceBonusContext, yieldBonusContext)).ToList();
                     var unsetByProduct = byProducts.Where(p => float.IsPositiveInfinity(p.Price)).FirstOrDefault();
                     if (unsetByProduct != null)
                     {
@@ -214,8 +218,9 @@ namespace TradeAssistant
                     }
 
                     // Labour cost
-                    var labourCost = recipe.Family.LaborInCalories.GetCurrentValue(user) * Config.CostPer1000Calories / 1000f;
-                    explanation.AppendLineLoc($"Labour{userText}: UserModifiedCalories ({Text.StyledNum(recipe.Family.LaborInCalories.GetCurrentValue(user))}) * CostPer1000Calories ({Text.StyledNum(Config.CostPer1000Calories)}) / 1000 = {Text.StyledNum(labourCost)}");
+                    var labor = BonusManager.ApplyBonuses(laborBonusContext, recipe.Family.Labor);
+                    var labourCost = labor * Config.CostPer1000Calories / 1000f;
+                    explanation.AppendLineLoc($"Labour{userText}: BonusAdjustedLabor ({Text.StyledNum(labor)}) * CostPer1000Calories ({Text.StyledNum(Config.CostPer1000Calories)}) / 1000 = {Text.StyledNum(labourCost)}");
 
                     // Ingredients cost
                     var getIngredientPrice = (Item ingredient, IngredientElement element) =>
@@ -223,18 +228,18 @@ namespace TradeAssistant
                         if (!TryGetCostPrice(ingredient, out var tempPrice, out var reason, out var innerWarnings))
                             return new IngredientPrice(float.PositiveInfinity, ingredient, reason.ToStringLoc(), innerWarnings);
 
-                        var ingredientCount = element.Quantity.GetCurrentValue(resourceEfficiencyContext, craftingTable);
+                        var ingredientCount = GetAdjustedIngredientQuantity(element, resourceEfficiencyContext, craftingTable, resourceBonusContext);
                         var count = ingredientCount;
                         var countText = TextLoc.StyledNum(count);
 
                         if (item is WorldObjectItem)
                         {
-                            count = element.Quantity.GetCurrentValueInt(resourceEfficiencyContext, craftingTable, WORLD_OBJECT_CAP_NUMBER) * 1f / WORLD_OBJECT_CAP_NUMBER;
+                            count = Mathf.CeilingToInt(ingredientCount * WORLD_OBJECT_CAP_NUMBER, IDynamicValue.ValueIntEpsilon) * 1f / WORLD_OBJECT_CAP_NUMBER;
                             countText = TextLoc.Foldout(TextLoc.StyledNum(count), Localizer.Do($"Count rounding reason"), Localizer.Do($"Crafting placable items are capped at crafting {Text.Info(WORLD_OBJECT_CAP_NUMBER)} at a time, so the count got rounded up from {Text.StyledNum(ingredientCount)} to {Text.StyledNum(count)}"));
                         }
                         else if (item.IsTool)
                         {
-                            count = element.Quantity.GetCurrentValueInt(resourceEfficiencyContext, craftingTable, TOOL_CAP_NUMBER) * 1f / TOOL_CAP_NUMBER;
+                            count = Mathf.CeilingToInt(ingredientCount * TOOL_CAP_NUMBER, IDynamicValue.ValueIntEpsilon) * 1f / TOOL_CAP_NUMBER;
                             countText = TextLoc.Foldout(TextLoc.StyledNum(count), Localizer.Do($"Count rounding reason"), Localizer.Do($"Tools are capped at crafting {Text.Info(TOOL_CAP_NUMBER)} tool(s) at a time, so the count got rounded up from {Text.StyledNum(ingredientCount)} to {Text.StyledNum(count)}"));
 
                         }
@@ -244,7 +249,7 @@ namespace TradeAssistant
 
                     var costs = recipe.Ingredients.Select(i => i.IsSpecificItem
                         ? getIngredientPrice(i.Item, i)
-                        : i.Tag.TaggedItems().Select(ti => getIngredientPrice(ti, i)).OrderBy(x => x.Price).First());
+                        : i.Tag.TaggedItems().Select(ti => getIngredientPrice(ti, i)).OrderBy(x => x.Price).First()).ToList();
                     if (costs.Any(c => float.IsPositiveInfinity(c.Price)))
                     {
                         failedRecipes.AddLoc($"For crafting {recipe.UILink()} we could not determine the price of {string.Join(", ", costs.Where(c => float.IsPositiveInfinity(c.Price)).Select(c => Localizer.Do($"{c.Item.UILink()} ({WhyFoldout(c)})")))}. Please run /ta setupbuy to add missing ingredients");
@@ -260,7 +265,7 @@ namespace TradeAssistant
                     }
                     explanation.AppendLineLoc($"Ingredients Total: {Text.StyledNum(ingredientsTotal)}");
 
-                    var productCount = product.Quantity.GetCurrentValue(resourceEfficiencyContext, craftingTable);
+                    var productCount = GetAdjustedProductQuantity(product, recipe, resourceEfficiencyContext, craftingTable, resourceBonusContext, yieldBonusContext);
 
                     var totalCost = (ingredientsTotal - byProductsPrice + labourCost) / productCount;
                     explanation.AppendLineLoc($"Total Cost: (Ingredients ({Text.StyledNum(ingredientsTotal)}) - ByProduct ({Text.StyledNum(byProductsPrice)}) + Labour Cost ({Text.StyledNum(labourCost)})) / ProductCount ({Text.StyledNum(productCount)}) = {Text.StyledNum(totalCost)}");
@@ -330,14 +335,27 @@ namespace TradeAssistant
 
         private static LocString WhyFoldout(IngredientPrice price) => TextLoc.FoldoutLoc($"Why?", $"Why {price.Item.UILink()}", price.Reason);
 
-        private ProductPrice ParseByProduct(CraftingElement product, ModuleContext resourceEfficiency, CraftingComponent craftingTable)
+        private static float GetAdjustedIngredientQuantity(IngredientElement ingredient, ModuleContext resourceEfficiency, CraftingComponent craftingTable, BonusContext resourceBonusContext)
+        {
+            var baseQuantity = ingredient.Quantity.GetCurrentValue(resourceEfficiency, craftingTable);
+            return ingredient.Quantity is ConstantValue ? baseQuantity : BonusManager.ApplyBonuses(resourceBonusContext, baseQuantity);
+        }
+
+        private static float GetAdjustedProductQuantity(CraftingElement product, Recipe recipe, ModuleContext resourceEfficiency, CraftingComponent craftingTable, BonusContext resourceBonusContext, BonusContext yieldBonusContext)
+        {
+            var baseQuantity = product.Quantity.GetCurrentValue(resourceEfficiency, craftingTable);
+            if (!recipe.IsIngredientRefund(product)) return BonusManager.ApplyBonuses(yieldBonusContext, baseQuantity);
+            return recipe.IsDiscountedIngredientRefund(product) ? baseQuantity * BonusManager.ApplyBonuses(resourceBonusContext, 1f) : baseQuantity;
+        }
+
+        private ProductPrice ParseByProduct(CraftingElement product, Recipe recipe, ModuleContext resourceEfficiency, CraftingComponent craftingTable, BonusContext resourceBonusContext, BonusContext yieldBonusContext)
         {
             if (!StoreSellPrices.TryGetValue(product.Item.TypeID, out var storePrice))
                 return new ProductPrice(product, float.PositiveInfinity, Localizer.Do($"No sell price set for the by-product {product.Item.UILink()}."));
             // SellPrice = CostPrice * (1 + Profit) / (1 - TaxRate)
             // CostPrice = SellPrice / (1 + Profit) * (1 - TaxRate)
             var costPrice = storePrice / (1 + Config.Profit / 100f) * (1 - Store.GetTax());
-            var quantity = product.Quantity.GetCurrentValue(resourceEfficiency, craftingTable);
+            var quantity = GetAdjustedProductQuantity(product, recipe, resourceEfficiency, craftingTable, resourceBonusContext, yieldBonusContext);
             var totalCostPrice = costPrice * quantity;
 
             var costReasonContent = new LocStringBuilder();
@@ -395,7 +413,6 @@ namespace TradeAssistant
             // Get all the crafting tables in the deed
             craftingTables = WorldObjectUtil.AllObjsWithComponent<CraftingComponent>()
                 .Where(workbench => workbench.IsRPCAuthorized(user.Player, AccessType.FullAccess, Array.Empty<object>()) && deed.Plots.Any(p => p.PlotPos == workbench.Parent.PlotPos()))
-                .DistinctBy(craftingTable => $"{craftingTable.Parent.Name}:{(craftingTable.ResourceEfficiencyModule == null ? "null" : craftingTable.ResourceEfficiencyModule.Name)}")
                 .ToList();
             if (!craftingTables.Any())
             {
@@ -427,14 +444,26 @@ namespace TradeAssistant
         public List<LocString> SetSellPrice(Item item, float newPrice)
         {
             newPrice = Mathf.RoundToAcceptedDigits(newPrice);
-            StoreSellPrices[item.TypeID] = newPrice;
-
             var msgs = new List<LocString>();
-            Store.StoreData.SellOffers.Where(o => o.MatchesTypeID(item.TypeID) && o.Price != newPrice).ForEach(o =>
+            // A tagged offer has one shared price. Preserve it when any represented item is frozen.
+            var offers = Store.StoreData.SellOffers
+                .Where(o => o.MatchesTypeID(item.TypeID))
+                .Where(o => !o.OfferedItemTypeIDs().Any(Config.FrozenSellPrices.Contains))
+                .ToList();
+            if (offers.Count == 0) return msgs;
+
+            offers.Where(o => o.Price != newPrice).ForEach(o =>
             {
                 msgs.AddLoc($"{Text.Positive(Localizer.DoStr("Updating sell price"))} of {item.UILink()} from {Text.StyledNum(o.Price)} to {Text.StyledNum(newPrice)}");
                 o.Price = newPrice;
             });
+            // Shared offers can affect several item IDs, and frozen overlapping offers can retain a lower price.
+            var actualPrices = Store.StoreData.SellOffers
+                .SelectMany(o => o.OfferedItemTypeIDs().Select(typeID => new { typeID, o.Price }))
+                .GroupBy(x => x.typeID)
+                .ToDictionary(x => x.Key, x => x.Min(o => o.Price));
+            StoreSellPrices.Clear();
+            foreach (var price in actualPrices) StoreSellPrices.Add(price.Key, price.Value);
             return msgs;
         }
 
@@ -442,14 +471,58 @@ namespace TradeAssistant
         public List<LocString> SetBuyPrice(Item item, float newPrice)
         {
             newPrice = Mathf.RoundToAcceptedDigits(newPrice);
-            StoreBuyPrices[item.TypeID] = newPrice;
-
             var msgs = new List<LocString>();
-            Store.StoreData.BuyOffers.Where(o => o.MatchesTypeID(item.TypeID) && o.Price != newPrice).ForEach(o =>
+            var offers = Store.StoreData.BuyOffers.Where(o => o.MatchesTypeID(item.TypeID)).ToList();
+            if (offers.Count == 0) return msgs;
+            offers.Where(o => o.Price != newPrice).ForEach(o =>
             {
                 msgs.AddLoc($"{Text.Positive(Localizer.DoStr("Updating buy price"))} of {item.UILink()} from {Text.StyledNum(o.Price)} to {Text.StyledNum(newPrice)}");
                 o.Price = newPrice;
             });
+            var actualPrices = Store.StoreData.BuyOffers
+                .SelectMany(o => o.OfferedItemTypeIDs().Select(typeID => new { typeID, o.Price }))
+                .GroupBy(x => x.typeID)
+                .ToDictionary(x => x.Key, x => x.Max(o => o.Price));
+            StoreBuyPrices.Clear();
+            foreach (var price in actualPrices) StoreBuyPrices.Add(price.Key, price.Value);
+            return msgs;
+        }
+
+        public List<LocString> SetSellPrices(IReadOnlyDictionary<int, float> prices, List<LocString> skipped, bool reportIncomplete = true) =>
+            SetOfferPrices(prices, skipped, false, reportIncomplete);
+
+        public List<LocString> SetBuyPrices(IReadOnlyDictionary<int, float> prices, List<LocString> skipped) =>
+            SetOfferPrices(prices, skipped, true, true);
+
+        private List<LocString> SetOfferPrices(IReadOnlyDictionary<int, float> prices, List<LocString> skipped, bool buying, bool reportIncomplete)
+        {
+            var msgs = new List<LocString>();
+            var offers = buying ? Store.StoreData.BuyOffers : Store.StoreData.SellOffers;
+            foreach (var offer in offers)
+            {
+                var ids = offer.OfferedItemTypeIDs().Distinct().OrderBy(id => id).ToList();
+                if (!ids.Any(prices.ContainsKey)) continue;
+                if (!buying && ids.Any(Config.FrozenSellPrices.Contains)) continue;
+                if (ids.Any(id => !prices.TryGetValue(id, out var price) || !float.IsFinite(price) || price < 0))
+                {
+                    if (reportIncomplete)
+                        skipped.AddLoc($"Kept the {(buying ? "buy" : "sell")} price for the order containing {Item.Get(ids[0]).UILink()}: a cost could not be calculated for every item in the order.");
+                    continue;
+                }
+                // One tagged order has one price: cover every sell cost and never overpay for a buy item.
+                var priceItem = buying ? ids.MinBy(id => prices[id]) : ids.MaxBy(id => prices[id]);
+                var newPrice = Mathf.RoundToAcceptedDigits(prices[priceItem]);
+                if (offer.Price == newPrice) continue;
+                msgs.AddLoc($"{Text.Positive(Localizer.DoStr(buying ? "Updating buy price" : "Updating sell price"))} for the order containing {Item.Get(priceItem).UILink()} from {Text.StyledNum(offer.Price)} to {Text.StyledNum(newPrice)}");
+                offer.Price = newPrice;
+            }
+            var actualPrices = offers
+                .SelectMany(o => o.OfferedItemTypeIDs().Select(typeID => new {typeID, o.Price}))
+                .GroupBy(x => x.typeID)
+                .ToDictionary(x => x.Key, x => buying ? x.Max(o => o.Price) : x.Min(o => o.Price));
+            var cache = buying ? StoreBuyPrices : StoreSellPrices;
+            cache.Clear();
+            foreach (var price in actualPrices) cache.Add(price.Key, price.Value);
             return msgs;
         }
     }
