@@ -22,8 +22,8 @@ class Program
     static int Main()
     {
         AssemblyLoadContext.Default.Resolving += (_, name) => {
-            var dependencyRoot = Environment.GetEnvironmentVariable("AWL_ECO_NATIVE_DEPENDENCY_DIR");
-            if (string.IsNullOrWhiteSpace(dependencyRoot)) dependencyRoot = Environment.GetEnvironmentVariable("AWL_ECO_NATIVE_DIR");
+            var dependencyRoot = Environment.GetEnvironmentVariable("ECO_NATIVE_DEPENDENCY_DIR");
+            if (string.IsNullOrWhiteSpace(dependencyRoot)) dependencyRoot = Environment.GetEnvironmentVariable("ECO_NATIVE_DIR");
             if (string.IsNullOrWhiteSpace(dependencyRoot)) dependencyRoot = AppContext.BaseDirectory;
             var path = Path.Combine(dependencyRoot, name.Name + ".dll");
             return File.Exists(path) ? AssemblyLoadContext.Default.LoadFromAssemblyPath(path) : null;
